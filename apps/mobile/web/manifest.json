@@ -1,0 +1,11 @@
+{
+  "name": "DeBeat.AI",
+  "short_name": "DeBeat.AI",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#090D16",
+  "theme_color": "#1A56FF",
+  "description": "DeBeat.AI - AI-Powered Real-Time Competitive Debate Arena",
+  "orientation": "portrait-primary",
+  "prefer_related_applications": false
+}

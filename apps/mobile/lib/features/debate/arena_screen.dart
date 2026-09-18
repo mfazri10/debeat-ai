@@ -3,22 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/theme/app_theme.dart';
-
-class DebateMessage {
-  final String speaker;
-  final String text;
-  final bool isAi;
-  final int? score;
-  final String? fallacy;
-
-  DebateMessage({
-    required this.speaker,
-    required this.text,
-    required this.isAi,
-    this.score,
-    this.fallacy,
-  });
-}
+import 'models/debate_message.dart';
+import 'widgets/scorecard_overlay.dart';
+import 'widgets/crowd_sentiment_bar.dart';
+import 'widgets/debate_speech_bubble.dart';
+import 'widgets/debate_input_bar.dart';
 
 class ArenaScreen extends ConsumerStatefulWidget {
   final String sessionId;
@@ -44,28 +33,30 @@ class _ArenaScreenState extends ConsumerState<ArenaScreen> {
   Timer? _timer;
   bool _isAiSpeaking = false;
 
-  // Skor 3 Juri Terakhir
+  // Skor 3 Juri AI
   int _scoreLogika = 82;
   int _scoreRetorika = 78;
   int _scoreDampak = 85;
   String? _detectedFallacy;
 
-  // Reaksi Penonton
-  String _activeReaction = '👏';
-  int _audienceSentiment = 75; // 0 - 100
+  // Sentimen Penonton Live
+  final String _activeReaction = '👏';
+  int _audienceSentiment = 75;
   String _latestCrowdComment = '“Analogi pendidikan tingginya sangat mengena!”';
 
-  final List<DebateMessage> _messages = [
-    DebateMessage(
-      speaker: 'Moderator AI',
-      text: 'Selamat datang di Arena Debat. Mosi ronde ini: "Dewan ini akan mewajibkan adopsi AI pada kurikulum pendidikan tinggi nasional". Giliran pembicara afirmatif (User) dipersilakan.',
-      isAi: true,
-    ),
-  ];
+  late final List<DebateMessage> _messages;
 
   @override
   void initState() {
     super.initState();
+    _messages = [
+      DebateMessage(
+        speaker: 'Moderator AI',
+        text:
+            'Selamat datang di Arena Debat. Mosi: "Dewan ini akan mewajibkan adopsi AI pada kurikulum pendidikan tinggi nasional". Giliran pembicara afirmatif (User) dipersilakan.',
+        isAi: true,
+      ),
+    ];
     _startTimer();
   }
 
@@ -87,6 +78,18 @@ class _ArenaScreenState extends ConsumerState<ArenaScreen> {
     super.dispose();
   }
 
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
   void _submitArgument() {
     final text = _textController.text.trim();
     if (text.isEmpty) return;
@@ -102,312 +105,156 @@ class _ArenaScreenState extends ConsumerState<ArenaScreen> {
       );
       _textController.clear();
       _isAiSpeaking = true;
+      _scoreLogika = 86;
+      _scoreRetorika = 81;
+      _scoreDampak = 88;
+      _audienceSentiment = 82;
+      _latestCrowdComment = '“Data empiris yang diajukan kuat sekali.”';
     });
-
     _scrollToBottom();
 
-    // Simulasi respons AI streaming via gRPC
-    Future.delayed(const Duration(milliseconds: 1500), () {
+    // AI Opponent counter-speech simulation (Microservice gRPC)
+    Future.delayed(const Duration(seconds: 2), () {
       if (!mounted) return;
       setState(() {
-        _isAiSpeaking = false;
         _messages.add(
           DebateMessage(
-            speaker: widget.initialData?['persona'] ?? 'Presiden RI',
-            text: 'Terima kasih atas argumen Saudara. Namun, kita tidak boleh mengabaikan disparitas infrastruktur digital antara universitas di kota besar dan daerah 3T. Kewajiban prematur justru memperlebar kesenjangan mutu pendidikan nasional.',
+            speaker: 'Lawan (Oposisi AI - Presiden RI)',
+            text:
+                'Saudara pembicara melupakan disparitas infrastruktur digital di wilayah 3T. Kewajiban kurikulum AI secara terburu-buru tanpa pemerataan listrik dan internet hanya akan memperlebar jurang ketimpangan antardaerah.',
             isAi: true,
             score: 88,
+            fallacy: 'Hasty Generalization (Terklarifikasi)',
           ),
         );
-        _scoreLogika = 88;
-        _scoreRetorika = 85;
-        _scoreDampak = 90;
-        _activeReaction = '😲';
-        _audienceSentiment = 82;
-        _latestCrowdComment = '“Bantahan telak mengenai infrastruktur 3T!”';
+        _isAiSpeaking = false;
+        _detectedFallacy = 'Hasty Generalization (Lawan menguji premis Anda)';
+        _audienceSentiment = 79;
+        _latestCrowdComment = '“Sanggahan oposisi tepat sasaran pada isu keadilan sosial!”';
       });
       _scrollToBottom();
     });
   }
 
-  void _scrollToBottom() {
-    Future.delayed(const Duration(milliseconds: 100), () {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
+  void _finishDebate() {
+    context.pushReplacement('/results/${widget.sessionId}', extra: {
+      'scoreLogika': _scoreLogika,
+      'scoreRetorika': _scoreRetorika,
+      'scoreDampak': _scoreDampak,
+      'totalScore': ((_scoreLogika + _scoreRetorika + _scoreDampak) / 3).round(),
+      'eloChange': '+24',
+      'winner': 'Afirmatif (Anda)',
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final topic = widget.initialData?['topic'] ??
-        'Dewan ini akan mewajibkan adopsi AI pada kurikulum nasional.';
+    final minutes = (_secondsLeft ~/ 60).toString().padLeft(2, '0');
+    final seconds = (_secondsLeft % 60).toString().padLeft(2, '0');
 
     return Scaffold(
+      backgroundColor: AppColors.background,
       appBar: AppBar(
         backgroundColor: AppColors.surface,
-        elevation: 1,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: AppColors.primary.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    'Ronde $_currentRound/$_totalRounds',
-                    style: const TextStyle(
-                      color: AppColors.primaryLight,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: () {
+            showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                backgroundColor: AppColors.surface,
+                title: const Text('Tinggalkan Arena?',
+                    style: TextStyle(color: Colors.white)),
+                content: const Text(
+                  'Jika keluar saat debat berlangsung, penalti ELO dapat dikenakan.',
+                  style: TextStyle(color: AppColors.textSecondary),
                 ),
-                const SizedBox(width: 8),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Lanjutkan Debat'),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      context.pop();
+                    },
+                    child: const Text('Keluar',
+                        style: TextStyle(color: AppColors.error)),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+        title: Column(
+          children: [
+            Text(
+              'Ronde $_currentRound / $_totalRounds',
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.timer_outlined,
+                    size: 12, color: AppColors.accent),
+                const SizedBox(width: 4),
                 Text(
-                  'Sisa: ${_secondsLeft ~/ 60}:${(_secondsLeft % 60).toString().padLeft(2, '0')}',
+                  '$minutes:$seconds',
                   style: const TextStyle(
-                    fontSize: 13,
-                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    color: AppColors.accent,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
               ],
             ),
-            Text(
-              topic,
-              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
           ],
         ),
+        centerTitle: true,
         actions: [
           IconButton(
-            icon: const Icon(Icons.flag_outlined, color: AppColors.danger),
-            tooltip: 'Selesai Debat',
-            onPressed: () {
-              context.pushReplacement('/results/${widget.sessionId}');
-            },
+            icon: const Icon(Icons.flag_outlined, color: AppColors.warning),
+            tooltip: 'Selesaikan & Evaluasi Juri',
+            onPressed: _finishDebate,
           ),
         ],
       ),
       body: Column(
         children: [
-          // 1. Live Audience & Judges Telemetry Bar
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            color: const Color(0xFF0C1322),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                // 3 AI Judges Scores
-                Row(
-                  children: [
-                    _buildJudgeBadge('⚖️ Logika', _scoreLogika),
-                    const SizedBox(width: 6),
-                    _buildJudgeBadge('🎭 Retorika', _scoreRetorika),
-                    const SizedBox(width: 6),
-                    _buildJudgeBadge('🌏 Dampak', _scoreDampak),
-                  ],
-                ),
-                // Live Audience Reaction Emoji
-                Row(
-                  children: [
-                    Text(_activeReaction, style: const TextStyle(fontSize: 20)),
-                    const SizedBox(width: 4),
-                    Text(
-                      '$_audienceSentiment%',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: AppColors.success,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
+          // Floating 3-Judges Scorecard
+          ScorecardOverlay(
+            scoreLogika: _scoreLogika,
+            scoreRetorika: _scoreRetorika,
+            scoreDampak: _scoreDampak,
+            detectedFallacy: _detectedFallacy,
           ),
 
-          // Live crowd comment ticker
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            color: AppColors.surface,
-            child: Text(
-              'Penonton: $_latestCrowdComment',
-              style: const TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: AppColors.textMuted),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
+          // Live Crowd Sentiment Gauge
+          CrowdSentimentBar(
+            sentimentPercent: _audienceSentiment,
+            activeReaction: _activeReaction,
+            latestComment: _latestCrowdComment,
           ),
 
-          // 2. Transcripts / Speech Bubbles
+          // Debate Messages Feed
           Expanded(
             child: ListView.builder(
               controller: _scrollController,
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.symmetric(vertical: 12),
               itemCount: _messages.length,
-              itemBuilder: (context, i) {
-                final m = _messages[i];
-                final isMe = !m.isAi;
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: Column(
-                    crossAxisAlignment:
-                        isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            m.speaker,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                              color: isMe ? AppColors.primaryLight : AppColors.secondary,
-                            ),
-                          ),
-                          if (m.score != null) ...[
-                            const SizedBox(width: 6),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                              decoration: BoxDecoration(
-                                color: Colors.emerald.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Text(
-                                'Skor: ${m.score}',
-                                style: const TextStyle(fontSize: 10, color: AppColors.success),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      Container(
-                        constraints: BoxConstraints(
-                          maxWidth: MediaQuery.of(context).size.width * 0.82,
-                        ),
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: isMe
-                              ? AppColors.primary.withOpacity(0.2)
-                              : AppColors.surface,
-                          border: Border.all(
-                            color: isMe ? AppColors.primary : AppColors.border,
-                          ),
-                          borderRadius: BorderRadius.only(
-                            topLeft: const Radius.circular(16),
-                            topRight: const Radius.circular(16),
-                            bottomLeft: Radius.circular(isMe ? 16 : 4),
-                            bottomRight: Radius.circular(isMe ? 4 : 16),
-                          ),
-                        ),
-                        child: Text(
-                          m.text,
-                          style: const TextStyle(fontSize: 14, height: 1.45),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
+              itemBuilder: (context, index) {
+                return DebateSpeechBubble(message: _messages[index]);
               },
             ),
           ),
 
-          // Typing indicator jika AI berpikir
-          if (_isAiSpeaking)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              child: Row(
-                children: [
-                  const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    '${widget.initialData?['persona'] ?? "AI"} sedang menyusun argumen bantahan...',
-                    style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
-                  ),
-                ],
-              ),
-            ),
-
-          // 3. Input Argumen & Mic Button
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: const BoxDecoration(
-              color: AppColors.surface,
-              border: Border(top: BorderSide(color: AppColors.border)),
-            ),
-            child: SafeArea(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _textController,
-                      maxLines: null,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _submitArgument(),
-                      decoration: InputDecoration(
-                        hintText: 'Tuliskan butir argumen Anda...',
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.mic, color: AppColors.secondary),
-                    tooltip: 'Bicara (Voice to Text)',
-                    onPressed: () {
-                      _textController.text =
-                          'Berdasarkan data riset UNESCO, kurikulum berbasis AI meningkatkan efisiensi belajar hingga 40%.';
-                    },
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.send_rounded, color: AppColors.primary),
-                    onPressed: _submitArgument,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildJudgeBadge(String title, int score) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(title, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary)),
-          const SizedBox(width: 4),
-          Text(
-            '$score',
-            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
+          // Speech Input Bar
+          DebateInputBar(
+            controller: _textController,
+            isAiSpeaking: _isAiSpeaking,
+            onSubmit: _submitArgument,
           ),
         ],
       ),
