@@ -55,12 +55,12 @@ func Load() *Config {
 		Env:  getEnv("APP_ENV", "development"),
 		Port: getEnv("PORT", "8080"),
 
-		DatabaseURL: mustEnv("DATABASE_URL"),
-		RedisURL:    getEnv("REDIS_URL", "redis://localhost:6379"),
+		DatabaseURL: getEnv("DATABASE_URL", "postgres://debateai:secret@postgres:5432/debateai_dev?sslmode=disable"),
+		RedisURL:    getEnv("REDIS_URL", "redis://redis:6379"),
 
-		DebateEngineAddr: getEnv("DEBATE_ENGINE_ADDR", "localhost:50051"),
+		DebateEngineAddr: getEnv("DEBATE_ENGINE_ADDR", "debate-engine:50051"),
 
-		JWTSecret:         mustEnv("JWT_SECRET"),
+		JWTSecret:         getEnv("JWT_SECRET", "super-secret-jwt-key-debateai-2026"),
 		JWTExpiryMinutes:  getEnvInt("JWT_EXPIRY_MINUTES", 15),
 		RefreshExpiryDays: getEnvInt("REFRESH_EXPIRY_DAYS", 30),
 
