@@ -111,11 +111,11 @@ func main() {
 	protected.POST("/sessions/:id/arguments", sessionHandler.SubmitArgument)
 
 	// Motion routes
-	motionHandler := motion.NewHandler(db)
+	motionHandler := motion.NewHandler(db.Pool)
 	protected.GET("/motions", motionHandler.List)
 
 	// Session template routes
-	templateHandler := template.NewHandler(db)
+	templateHandler := template.NewHandler(db.Pool)
 	protected.GET("/session-templates", templateHandler.List)
 	protected.POST("/session-templates", templateHandler.Create)
 	protected.DELETE("/session-templates/:id", templateHandler.Delete)
@@ -127,10 +127,10 @@ func main() {
 	protected.POST("/knowledge/ingest/pdf", knowledgeHandler.IngestPDF)
 
 	// WebSocket — Arena Debat (real-time)
-	debateHub := debate.NewHub(grpcClients, db, rdb)
+	debateHub := debate.NewHub(grpcClients)
 	go debateHub.Run()
 
-	debateHandler := debate.NewHandler(debateHub, db, cfg)
+	debateHandler := debate.NewHandler(debateHub, cfg)
 	e.GET("/ws/debate/:sessionId", debateHandler.HandleWebSocket,
 		auth.JWTMiddlewareWS(cfg.JWTSecret),
 	)

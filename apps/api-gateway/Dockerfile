@@ -8,12 +8,11 @@ WORKDIR /app
 # Install git and ca-certificates
 RUN apk add --no-cache git ca-certificates
 
-# Cache dependencies
-COPY go.mod ./
-# RUN go mod download
-
 # Copy source code
 COPY . .
+
+# Download and tidy dependencies
+RUN go mod tidy
 
 # Build statically linked binary
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o server ./cmd/server

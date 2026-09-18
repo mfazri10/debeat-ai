@@ -3,7 +3,6 @@ syntax = "proto3";
 package debateai.v1;
 
 option go_package = "github.com/debateai/api-gateway/gen/go/debateai/v1;debateaiv1";
-option python_package = "gen.python.debateai.v1";
 
 // ============================================================
 // SHARED MESSAGE TYPES
