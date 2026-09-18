@@ -11,8 +11,10 @@ import (
 	"github.com/debateai/api-gateway/internal/auth"
 	"github.com/debateai/api-gateway/internal/debate"
 	"github.com/debateai/api-gateway/internal/knowledge"
+	"github.com/debateai/api-gateway/internal/motion"
 	"github.com/debateai/api-gateway/internal/persona"
 	"github.com/debateai/api-gateway/internal/session"
+	"github.com/debateai/api-gateway/internal/template"
 	"github.com/debateai/api-gateway/internal/user"
 	"github.com/debateai/api-gateway/pkg/config"
 	"github.com/debateai/api-gateway/pkg/database"
@@ -107,6 +109,16 @@ func main() {
 	protected.GET("/sessions/:id/results", sessionHandler.GetResults)
 	protected.GET("/sessions/:id/transcript", sessionHandler.GetTranscript)
 	protected.POST("/sessions/:id/arguments", sessionHandler.SubmitArgument)
+
+	// Motion routes
+	motionHandler := motion.NewHandler(db)
+	protected.GET("/motions", motionHandler.List)
+
+	// Session template routes
+	templateHandler := template.NewHandler(db)
+	protected.GET("/session-templates", templateHandler.List)
+	protected.POST("/session-templates", templateHandler.Create)
+	protected.DELETE("/session-templates/:id", templateHandler.Delete)
 
 	// Knowledge routes
 	knowledgeHandler := knowledge.NewHandler(db, grpcClients)
