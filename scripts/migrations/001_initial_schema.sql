@@ -279,6 +279,55 @@ CREATE TABLE IF NOT EXISTS user_daily_usage (
     UNIQUE(user_id, usage_date)
 );
 
+CREATE TABLE IF NOT EXISTS debate_motions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    text            TEXT NOT NULL,
+    category        VARCHAR(50) NOT NULL,
+    format          VARCHAR(30),
+    language        VARCHAR(5) DEFAULT 'ID',
+    difficulty      VARCHAR(20) DEFAULT 'MEDIUM',
+    source          VARCHAR(100),
+    is_active       BOOLEAN DEFAULT TRUE,
+    usage_count     INTEGER DEFAULT 0,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS session_templates (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name            VARCHAR(100) NOT NULL,
+    topic           TEXT,
+    category        VARCHAR(50) DEFAULT 'FREE',
+    format          VARCHAR(30) DEFAULT 'FREE',
+    total_rounds    INTEGER DEFAULT 3,
+    time_per_turn   INTEGER DEFAULT 300,
+    ai_provider     VARCHAR(20) DEFAULT 'GEMINI',
+    ai_difficulty   VARCHAR(20),
+    persona_id      UUID REFERENCES personas(id) ON DELETE SET NULL,
+    is_judged       BOOLEAN DEFAULT TRUE,
+    has_audience    BOOLEAN DEFAULT TRUE,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS badges (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code            VARCHAR(50) UNIQUE NOT NULL,
+    name            VARCHAR(100) NOT NULL,
+    description     TEXT NOT NULL,
+    icon_url        TEXT,
+    category        VARCHAR(50) DEFAULT 'general',
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS user_badges (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    badge_id        UUID NOT NULL REFERENCES badges(id) ON DELETE CASCADE,
+    earned_at       TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, badge_id)
+);
+
 -- ============================================================
 -- INDEXES
 -- ============================================================
@@ -293,6 +342,10 @@ CREATE INDEX IF NOT EXISTS idx_arguments_session ON debate_arguments(session_id,
 CREATE INDEX IF NOT EXISTS idx_judge_scores_arg ON judge_scores(argument_id);
 CREATE INDEX IF NOT EXISTS idx_audience_reactions_arg ON audience_reactions(argument_id);
 CREATE INDEX IF NOT EXISTS idx_daily_usage_date ON user_daily_usage(usage_date);
+CREATE INDEX IF NOT EXISTS idx_motions_category_lang ON debate_motions(category, language);
+CREATE INDEX IF NOT EXISTS idx_motions_active ON debate_motions(is_active);
+CREATE INDEX IF NOT EXISTS idx_session_templates_user ON session_templates(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_badges_user ON user_badges(user_id);
 
 -- IVFFlat Index untuk pgvector (cosine similarity)
 CREATE INDEX IF NOT EXISTS idx_kb_chunks_embedding
