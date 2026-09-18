@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package debateai.v1;
+
+option go_package = "github.com/debateai/api-gateway/gen/go/debateai/v1;debateaiv1";
+
+import "proto/messages.proto";
+
+// ============================================================
+// DEBATE ENGINE SERVICE
+// Dijalankan oleh: Python FastAPI + grpcio
+// Dipanggil oleh : Go API Gateway
+// ============================================================
+
+service DebateEngine {
+  // -----------------------------------------------------------
+  // UNARY — Generate respons AI Lawan (tanpa streaming)
+  // Digunakan saat: Free tier, atau fallback jika streaming gagal
+  // -----------------------------------------------------------
+  rpc GenerateOpponentResponse(OpponentRequest) returns (OpponentResponse);
+
+  // -----------------------------------------------------------
+  // SERVER STREAMING — Generate respons AI Lawan dengan streaming
+  // Teks muncul karakter per karakter seperti ChatGPT
+  // Go forward setiap chunk ke Flutter via WebSocket
+  // -----------------------------------------------------------
+  rpc StreamOpponentResponse(OpponentRequest) returns (stream OpponentChunk);
+
+  // -----------------------------------------------------------
+  // UNARY — Score argumen dari 3 juri secara paralel
+  // Python menjalankan asyncio.gather untuk 3 juri sekaligus
+  // Return setelah semua juri selesai (atau partial jika 1 gagal)
+  // -----------------------------------------------------------
+  rpc ScoreArgument(ScoreRequest) returns (ScoreResponse);
+
+  // -----------------------------------------------------------
+  // UNARY — Generate reaksi penonton
+  // Dipanggil setelah ScoreArgument selesai
+  // -----------------------------------------------------------
+  rpc GenerateAudienceReaction(AudienceRequest) returns (AudienceResponse);
+
+  // -----------------------------------------------------------
+  // BIDIRECTIONAL STREAMING — Full debate orchestration
+  // Satu koneksi gRPC untuk seluruh sesi debat
+  // Go kirim DebateEvent → Python kirim DebateUpdate (stream)
+  // Paling efisien: opponent stream + judge + audience dalam 1 koneksi
+  // -----------------------------------------------------------
+  rpc OrchestrateDebate(stream DebateEvent) returns (stream DebateUpdate);
+}

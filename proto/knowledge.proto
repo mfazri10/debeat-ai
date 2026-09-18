@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package debateai.v1;
+
+option go_package = "github.com/debateai/api-gateway/gen/go/debateai/v1;debateaiv1";
+
+import "proto/messages.proto";
+
+// ============================================================
+// KNOWLEDGE BASE SERVICE
+// Dijalankan oleh: Python FastAPI + grpcio
+// Dipanggil oleh : Go API Gateway
+// ============================================================
+
+service KnowledgeBase {
+  // -----------------------------------------------------------
+  // UNARY — Retrieve top-K chunks relevan dari pgvector
+  // Dipanggil sebelum OrchestrateDebate untuk inject KB context
+  // -----------------------------------------------------------
+  rpc SearchKnowledge(SearchRequest) returns (SearchResponse);
+
+  // -----------------------------------------------------------
+  // UNARY — Generate embedding vektor dari teks
+  // Digunakan untuk: query search, indexing argumen user
+  // -----------------------------------------------------------
+  rpc GenerateEmbedding(EmbeddingRequest) returns (EmbeddingResponse);
+
+  // -----------------------------------------------------------
+  // SERVER STREAMING — Ingest dokumen dengan progress update
+  // Admin panel polling progress: EXTRACTING → CHUNKING → EMBEDDING → DONE
+  // -----------------------------------------------------------
+  rpc IngestDocument(IngestRequest) returns (stream IngestProgress);
+}

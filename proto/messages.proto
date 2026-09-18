@@ -1,0 +1,216 @@
+syntax = "proto3";
+
+package debateai.v1;
+
+option go_package = "github.com/debateai/api-gateway/gen/go/debateai/v1;debateaiv1";
+option python_package = "gen.python.debateai.v1";
+
+// ============================================================
+// SHARED MESSAGE TYPES
+// ============================================================
+
+// Persona yang dilakonkan peserta atau AI
+message PersonaContext {
+  string id            = 1;
+  string name          = 2;
+  string description   = 3;
+  string speaking_style = 4;
+  string stance        = 5; // "PRO", "CONTRA", "NEUTRAL"
+}
+
+// Satu entri riwayat argumen dalam debat
+message ArgumentHistory {
+  string participant_id = 1;
+  string content        = 2;
+  string role           = 3; // "user" atau "ai"
+  int32  round_number   = 4;
+  int32  turn_number    = 5;
+}
+
+// Chunk dokumen dari knowledge base (hasil RAG)
+message KbChunk {
+  string id             = 1;
+  string content        = 2;
+  string document_title = 3;
+  string source_url     = 4;
+  float  similarity     = 5;
+}
+
+// ============================================================
+// OPPONENT (AI LAWAN) MESSAGES
+// ============================================================
+
+message OpponentRequest {
+  string   session_id              = 1;
+  string   topic                   = 2;
+  string   format                  = 3;  // "KDMI", "OXFORD", "BP", "NUDC", "FREE", "INTERVIEW"
+  string   language                = 4;  // "ID", "EN"
+  string   difficulty              = 5;  // "EASY", "MEDIUM", "HARD"
+  string   ai_provider             = 6;  // "GEMINI", "OPENAI", "ANTHROPIC"
+  PersonaContext   persona         = 7;
+  repeated ArgumentHistory history = 8;
+  repeated KbChunk kb_context      = 9;
+}
+
+message OpponentResponse {
+  string content       = 1;
+  string provider_used = 2;
+  int32  tokens_used   = 3;
+  int64  latency_ms    = 4;
+}
+
+// Untuk server streaming — satu chunk teks per pesan
+message OpponentChunk {
+  string content       = 1;
+  bool   is_done       = 2;
+  string provider_used = 3; // Hanya diisi saat is_done = true
+}
+
+// ============================================================
+// JUDGE SCORING MESSAGES
+// ============================================================
+
+message ScoreRequest {
+  string   session_id              = 1;
+  string   argument_id             = 2;
+  string   content                 = 3;
+  string   language                = 4;
+  repeated ArgumentHistory history = 5;
+  repeated KbChunk kb_context      = 6;
+}
+
+message ScoreResponse {
+  JudgeResult logika   = 1;
+  JudgeResult retorika = 2;
+  JudgeResult dampak   = 3;
+}
+
+message JudgeResult {
+  string   judge_type                      = 1;  // "LOGIKA", "RETORIKA", "DAMPAK"
+  int32    argument_strength               = 2;  // 0-100
+  int32    fact_data_usage                 = 3;  // 0-100
+  int32    rhetoric_technique              = 4;  // 0-100
+  int32    responsiveness                  = 5;  // 0-100
+  int32    clarity_structure               = 6;  // 0-100
+  float    total_score                     = 7;
+  string   summary                         = 8;
+  repeated string highlights_positive      = 9;
+  repeated string highlights_negative      = 10;
+  string   fallacy_detected                = 11; // Kosong jika tidak ada
+  string   suggestion                      = 12;
+}
+
+// ============================================================
+// AUDIENCE REACTION MESSAGES
+// ============================================================
+
+message AudienceRequest {
+  float  avg_judge_score = 1;
+  string language        = 2;
+  string topic           = 3;
+}
+
+message AudienceResponse {
+  string   reaction_type   = 1; // "APPLAUSE", "BOO", "NEUTRAL", "EXCITED", "SKEPTICAL"
+  int32    intensity        = 2; // 0-100
+  repeated string comments = 3; // 5-8 komentar
+}
+
+// ============================================================
+// BIDIRECTIONAL STREAMING — ORCHESTRATE DEBATE
+// ============================================================
+
+// Client → Server events
+message DebateEvent {
+  oneof event {
+    ArgumentSubmittedEvent argument_submitted = 1;
+    SessionStartedEvent    session_started    = 2;
+    SessionEndedEvent      session_ended      = 3;
+  }
+}
+
+message ArgumentSubmittedEvent {
+  string session_id     = 1;
+  string argument_id    = 2;
+  string content        = 3;
+  string participant_id = 4;
+  int32  round_number   = 5;
+  int32  turn_number    = 6;
+}
+
+message SessionStartedEvent {
+  string         session_id   = 1;
+  string         topic        = 2;
+  string         format       = 3;
+  string         language     = 4;
+  string         difficulty   = 5;
+  string         ai_provider  = 6;
+  PersonaContext ai_persona   = 7;
+}
+
+message SessionEndedEvent {
+  string session_id = 1;
+}
+
+// Server → Client updates
+message DebateUpdate {
+  oneof update {
+    OpponentChunk    opponent_chunk  = 1; // Streaming teks AI Lawan
+    JudgeResult      judge_result   = 2; // Skor dari salah satu juri
+    AudienceResponse audience_react = 3; // Reaksi penonton
+    ErrorUpdate      error          = 4;
+  }
+}
+
+message ErrorUpdate {
+  string code    = 1;
+  string message = 2;
+  bool   retryable = 3;
+}
+
+// ============================================================
+// KNOWLEDGE BASE MESSAGES
+// ============================================================
+
+message SearchRequest {
+  repeated float  embedding   = 1; // Query vector 768-dim
+  int32           top_k       = 2; // Default: 5
+  float           threshold   = 3; // Default: 0.75
+  string          language    = 4; // "ID" atau "EN"
+  repeated string topic_tags  = 5;
+}
+
+message SearchResponse {
+  repeated KbChunk chunks = 1;
+}
+
+message EmbeddingRequest {
+  string text     = 1;
+  string language = 2;
+  string model    = 3; // "gemini" atau "openai"
+}
+
+message EmbeddingResponse {
+  repeated float embedding  = 1; // 768 floats
+  string         model_used = 2;
+  int64          latency_ms = 3;
+}
+
+message IngestRequest {
+  string   source_type    = 1; // "YOUTUBE", "PDF", "WEB", "MANUAL"
+  string   source_url     = 2;
+  string   title          = 3;
+  string   language       = 4;
+  repeated string topic_tags   = 5;
+  repeated string persona_tags = 6;
+  bytes    file_content   = 7; // Untuk PDF upload (base64 encoded)
+  string   ingested_by_id = 8; // Admin user ID
+}
+
+message IngestProgress {
+  string status            = 1; // "EXTRACTING", "CHUNKING", "EMBEDDING", "STORING", "DONE", "ERROR"
+  int32  chunks_processed  = 2;
+  int32  total_chunks      = 3;
+  string current_step      = 4; // Deskripsi langkah saat ini
+  string error_message     = 5; // Diisi hanya saat status = "ERROR"
+}
