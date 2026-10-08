@@ -3,6 +3,7 @@ package motion
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -84,9 +85,5 @@ func (h *Handler) List(c echo.Context) error {
 }
 
 func itoa(i int) string {
-	digits := []byte("0123456789")
-	if i < 10 {
-		return string([]byte{digits[i]})
-	}
-	return "10"
+	return strconv.Itoa(i)
 }

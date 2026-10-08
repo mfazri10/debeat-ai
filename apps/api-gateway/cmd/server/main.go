@@ -127,7 +127,7 @@ func main() {
 	protected.POST("/knowledge/ingest/pdf", knowledgeHandler.IngestPDF)
 
 	// WebSocket — Arena Debat (real-time)
-	debateHub := debate.NewHub(grpcClients)
+	debateHub := debate.NewHub(grpcClients, session.NewStore(db))
 	go debateHub.Run()
 
 	debateHandler := debate.NewHandler(debateHub, cfg)

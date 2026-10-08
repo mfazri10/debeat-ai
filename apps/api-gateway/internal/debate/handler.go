@@ -7,6 +7,7 @@ import (
 	"time"
 
 	pb "github.com/debateai/api-gateway/gen/go/debateai/v1"
+	"github.com/debateai/api-gateway/internal/session"
 	"github.com/debateai/api-gateway/pkg/config"
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
@@ -36,7 +37,7 @@ func NewHandler(hub *Hub, cfg *config.Config) *Handler {
 // Path: GET /ws/debate/:sessionId
 func (h *Handler) HandleWebSocket(c echo.Context) error {
 	sessionID := c.Param("sessionId")
-	userID := c.Get("userID").(string) // Diset oleh JWTMiddlewareWS
+	userID, _ := c.Get("user_id").(string) // Diset oleh JWTMiddlewareWS
 
 	// Upgrade ke WebSocket
 	conn, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
@@ -160,43 +161,73 @@ func (h *Hub) processClientMessage(c *Client, msg ClientMessage) {
 }
 
 // handleArgument adalah inti dari arena debat:
-// User kirim argumen → RAG search → AI Lawan stream → 3 Juri score → Audience react
+// User kirim argumen → persist DB → RAG search → SessionStarted (jika pertama) → AI pipeline
 func (h *Hub) handleArgument(c *Client, msg ClientMessage) {
 	ctx := context.Background()
 	sessionID := msg.SessionID
 
-	// 1. Notify semua client bahwa AI sedang berpikir
+	// 1. Muat sesi dari DB — validasi keberadaan & ambil konfigurasi
+	sess, err := h.store.GetByID(ctx, sessionID)
+	if err != nil {
+		c.Send(ServerMessage{
+			Type:    MsgTypeError,
+			Payload: map[string]string{"code": "SESSION_NOT_FOUND", "message": "Sesi tidak ditemukan. Buat sesi terlebih dahulu."},
+		})
+		return
+	}
+
+	// 2. Persist argumen user ke DB
+	participantID, perr := h.store.GetUserParticipantID(ctx, sessionID, c.userID)
+	if perr != nil {
+		// Fallback: user belum terdaftar sebagai partisipan (mis. guest dev) — daftarkan
+		participantID, perr = h.store.AddParticipant(ctx, sessionID, map[string]any{
+			"user_id":       c.userID,
+			"persona_id":    nil,
+			"persona_name":  "Anda",
+			"stance":        "PRO",
+			"role":          "HOST",
+			"is_ai":         false,
+			"ai_difficulty": nil,
+		})
+		if perr != nil {
+			c.Send(ServerMessage{
+				Type:    MsgTypeError,
+				Payload: map[string]string{"code": "PARTICIPANT_ERROR", "message": "Gagal mendaftarkan partisipan."},
+			})
+			return
+		}
+	}
+
+	round, turn, _ := h.store.IncrementTurn(ctx, sessionID)
+	argumentID, _ := h.store.InsertArgument(ctx, sessionID, participantID, msg.Content, "TEXT", round, turn, nil)
+
+	// 3. Notify semua client bahwa AI sedang berpikir
 	h.BroadcastToSession(sessionID, ServerMessage{
 		Type:    MsgTypeAIThinking,
 		Payload: nil,
 	})
 
-	// 2. Generate embedding dari argumen user untuk RAG
+	// 4. Generate embedding dari argumen user untuk RAG
+	var kbChunks []*pb.KbChunk
 	embeddingResp, err := h.grpc.GenerateEmbedding(ctx, &pb.EmbeddingRequest{
 		Text:     msg.Content,
-		Language: "ID", // TODO: ambil dari session config
+		Language: sess.Language,
 	})
-	if err != nil {
-		// Lanjut tanpa RAG (graceful degradation)
-		embeddingResp = nil
-	}
-
-	// 3. Search knowledge base (RAG retrieval)
-	var kbChunks []*pb.KbChunk
-	if embeddingResp != nil {
-		kbResp, err := h.grpc.SearchKnowledge(ctx, &pb.SearchRequest{
+	if err == nil && embeddingResp != nil {
+		// 5. Search knowledge base (RAG retrieval)
+		kbResp, kerr := h.grpc.SearchKnowledge(ctx, &pb.SearchRequest{
 			Embedding: embeddingResp.Embedding,
 			TopK:      5,
-			Threshold: 0.75,
-			Language:  "ID",
+			Threshold: 0.70,
+			Language:  sess.Language,
 		})
-		if err == nil && kbResp != nil {
+		if kerr == nil && kbResp != nil {
 			kbChunks = kbResp.Chunks
 		}
 	}
 
-	// 4. Buka bidirectional gRPC stream ke Python untuk full orchestration
-	stream, err := h.grpc.OrchestrateDebate(ctx)
+	// 6. Ambil atau buat orchestrator (stream gRPC per-sesi)
+	orch, err := h.getOrCreateOrchestrator(ctx, sessionID)
 	if err != nil {
 		h.BroadcastToSession(sessionID, ServerMessage{
 			Type:    MsgTypeError,
@@ -205,55 +236,75 @@ func (h *Hub) handleArgument(c *Client, msg ClientMessage) {
 		return
 	}
 
-	// 5. Kirim event ArgumentSubmitted ke Python
-	_ = stream.Send(&pb.DebateEvent{
-		Event: &pb.DebateEvent_ArgumentSubmitted{
-			ArgumentSubmitted: &pb.ArgumentSubmittedEvent{
-				SessionId:   sessionID,
-				Content:     msg.Content,
-				ParticipantId: c.userID,
-				// TODO: isi round_number dan turn_number dari state Redis
-			},
-		},
+	// 7. Kirim SessionStartedEvent sekali (fix bug SESSION_NOT_STARTED)
+	orch.ensureStarted(h.buildSessionConfig(ctx, sess))
+
+	// 8. Kirim event ArgumentSubmitted ke Python (dengan KB context)
+	orch.sendArgument(&pb.ArgumentSubmittedEvent{
+		SessionId:     sessionID,
+		ArgumentId:    argumentID,
+		Content:       msg.Content,
+		ParticipantId: c.userID,
+		RoundNumber:   int32(round),
+		TurnNumber:    int32(turn),
 	})
 
-	// 6. Terima stream updates dari Python dan broadcast ke Flutter
-	go func() {
-		_ = kbChunks // digunakan sebagai context (sudah di-inject di Python via session state)
-		for {
-			update, err := stream.Recv()
-			if err != nil {
-				break
-			}
+	// kbChunks diteruskan via session state di Python; broadcast update
+	// ditangani oleh orchestrator.recvLoop. Simpan referensi KB untuk logging.
+	_ = kbChunks
+}
 
-			switch u := update.Update.(type) {
-			case *pb.DebateUpdate_OpponentChunk:
-				// Streaming teks AI Lawan — karakter per karakter ke Flutter
-				h.BroadcastAIChunk(sessionID, u.OpponentChunk.Content, u.OpponentChunk.IsDone)
+// buildSessionConfig menyusun SessionStartedEvent dari data sesi di DB.
+func (h *Hub) buildSessionConfig(ctx context.Context, sess *session.Session) *pb.SessionStartedEvent {
+	cfg := &pb.SessionStartedEvent{
+		SessionId:  sess.ID,
+		Topic:      sess.Topic,
+		Format:     sess.Format,
+		Language:   sess.Language,
+		Difficulty: "MEDIUM",
+		AiProvider: sess.AIProvider,
+	}
 
-			case *pb.DebateUpdate_JudgeResult:
-				// Skor dari salah satu juri (Logika / Retorika / Dampak)
-				h.BroadcastJudgeScore(sessionID, u.JudgeResult)
-
-			case *pb.DebateUpdate_AudienceReact:
-				// Reaksi penonton (emoji + komentar)
-				h.BroadcastAudienceReaction(sessionID, u.AudienceReact)
-
-			case *pb.DebateUpdate_Error:
-				h.BroadcastToSession(sessionID, ServerMessage{
-					Type: MsgTypeError,
-					Payload: map[string]string{
-						"code":    u.Error.Code,
-						"message": u.Error.Message,
-					},
-				})
+	// Ambil persona AI dari DB
+	personaID, personaName, stance, difficulty, err := h.store.GetAIParticipant(ctx, sess.ID)
+	if err == nil {
+		cfg.Difficulty = derefOr(difficulty, "MEDIUM")
+		persona := &pb.PersonaContext{
+			Name:   derefOr(personaName, "AI Lawan"),
+			Stance: derefOr(stance, "CONTRA"),
+		}
+		if personaID != nil && *personaID != "" {
+			persona.Id = *personaID
+			if name, desc, style, pstance, perr := h.store.GetPersonaDetail(ctx, *personaID); perr == nil {
+				persona.Name = derefOr(name, persona.Name)
+				persona.Description = derefOr(desc, "")
+				persona.SpeakingStyle = derefOr(style, "")
+				if pstance != nil && *pstance != "" {
+					persona.Stance = *pstance
+				}
 			}
 		}
-	}()
+		cfg.AiPersona = persona
+	}
+
+	return cfg
+}
+
+func derefOr(s *string, def string) string {
+	if s == nil || *s == "" {
+		return def
+	}
+	return *s
 }
 
 // handleForfeit menangani pengguna yang menyerah.
 func (h *Hub) handleForfeit(c *Client, msg ClientMessage) {
+	// Tutup orchestrator sesi
+	h.removeOrchestrator(msg.SessionID)
+	// Tandai sesi selesai di DB
+	if h.store != nil {
+		_ = h.store.SetStatus(context.Background(), msg.SessionID, "CANCELLED")
+	}
 	h.BroadcastToSession(msg.SessionID, ServerMessage{
 		Type: MsgTypeSessionEnd,
 		Payload: map[string]interface{}{

@@ -1,7 +1,7 @@
 import asyncio
 import grpc
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Dict
 
 from debateai.v1 import debate_pb2, debate_pb2_grpc, messages_pb2
 
@@ -13,11 +13,77 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+class _SessionState:
+    """State in-memory per sesi debat: riwayat argumen + konteks RAG."""
+
+    def __init__(self):
+        self.history: list = []          # list[ArgumentHistory]
+        self.kb_context: list = []       # list[KbChunk] terakhir
+        self.turn_count: int = 0
+
+
 class DebateEngineServicer(debate_pb2_grpc.DebateEngineServicer):
     """
     Implementasi gRPC DebateEngine service.
     Dipanggil oleh Go API Gateway melalui gRPC.
     """
+
+    def __init__(self):
+        # session_id → _SessionState (riwayat debat per sesi)
+        self._sessions: Dict[str, _SessionState] = {}
+
+    def _get_state(self, session_id: str) -> _SessionState:
+        if session_id not in self._sessions:
+            self._sessions[session_id] = _SessionState()
+        return self._sessions[session_id]
+
+    async def _rag_search(self, text: str, language: str) -> list:
+        """Embedding + pgvector search untuk RAG context. Return list[KbChunk] (mungkin kosong)."""
+        try:
+            import asyncpg
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+            if not settings.GEMINI_API_KEY:
+                return []
+
+            embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/text-embedding-004",
+                google_api_key=settings.GEMINI_API_KEY,
+            )
+            vector = await embeddings.aembed_query(text)
+            embedding_str = "[" + ",".join(str(x) for x in vector) + "]"
+
+            url = settings.DATABASE_URL.replace("postgres+asyncpg://", "postgres://")
+            conn = await asyncpg.connect(url)
+            try:
+                rows = await conn.fetch(
+                    """
+                    SELECT c.id, c.content, d.title, d.source_url,
+                           1 - (c.embedding <=> $1::vector) AS similarity
+                    FROM kb_chunks c
+                    JOIN kb_documents d ON c.document_id = d.id
+                    WHERE c.is_active = TRUE AND d.is_active = TRUE
+                      AND 1 - (c.embedding <=> $1::vector) >= $2
+                    ORDER BY c.embedding <=> $1::vector ASC
+                    LIMIT $3;
+                    """,
+                    embedding_str, settings.RAG_THRESHOLD, settings.RAG_TOP_K,
+                )
+                return [
+                    messages_pb2.KbChunk(
+                        id=str(r["id"]),
+                        content=r["content"],
+                        document_title=r["title"] or "",
+                        source_url=r["source_url"] or "",
+                        similarity=float(r["similarity"]),
+                    )
+                    for r in rows
+                ]
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.warning(f"[Orchestrate] RAG search gagal (lanjut tanpa KB): {e}")
+            return []
 
     # ----------------------------------------------------------
     # 1. UNARY — Generate respons AI Lawan (tanpa streaming)
@@ -181,7 +247,24 @@ class DebateEngineServicer(debate_pb2_grpc.DebateEngineServicer):
                     )
                     continue
 
-                # Step 1: Stream opponent response
+                state = self._get_state(arg.session_id)
+                state.turn_count += 1
+
+                # Catat argumen user ke riwayat sesi
+                state.history.append(messages_pb2.ArgumentHistory(
+                    participant_id=arg.participant_id,
+                    content=arg.content,
+                    role="user",
+                    round_number=arg.round_number,
+                    turn_number=arg.turn_number,
+                ))
+
+                # Step 0: RAG search untuk konteks faktual (fix: KB tersuntik ke AI)
+                kb_chunks = await self._rag_search(arg.content, session_config.language)
+                if kb_chunks:
+                    state.kb_context = kb_chunks
+
+                # Step 1: Stream opponent response (dengan history + KB context)
                 opponent_agent = OpponentAgent(
                     persona=session_config.ai_persona,
                     format=session_config.format,
@@ -192,8 +275,8 @@ class DebateEngineServicer(debate_pb2_grpc.DebateEngineServicer):
 
                 full_content = []
                 async for chunk, is_done, provider in opponent_agent.stream(
-                    history=[],  # TODO: inject dari session state
-                    kb_context=[],
+                    history=list(state.history),
+                    kb_context=list(state.kb_context),
                 ):
                     full_content.append(chunk)
                     yield messages_pb2.DebateUpdate(
@@ -204,39 +287,63 @@ class DebateEngineServicer(debate_pb2_grpc.DebateEngineServicer):
                         )
                     )
 
+                # Catat respons AI ke riwayat sesi
+                ai_text = "".join(full_content)
+                state.history.append(messages_pb2.ArgumentHistory(
+                    participant_id="ai-opponent",
+                    content=ai_text,
+                    role="ai",
+                    round_number=arg.round_number,
+                    turn_number=arg.turn_number,
+                ))
+                # Batasi riwayat agar prompt tidak membengkak
+                if len(state.history) > 12:
+                    state.history = state.history[-12:]
+
                 # Step 2: Score + audience secara paralel
                 score_req = messages_pb2.ScoreRequest(
                     session_id=arg.session_id,
                     argument_id=arg.argument_id,
                     content=arg.content,
                     language=session_config.language,
+                    history=list(state.history[:-1]),  # riwayat sebelum argumen ini
+                    kb_context=list(state.kb_context),
                 )
 
-                avg_score = 70.0  # Default sebelum judge selesai
-
-                logika, retorika, dampak, audience = await asyncio.gather(
+                logika, retorika, dampak = await asyncio.gather(
                     JudgeAgent("LOGIKA").score(score_req),
                     JudgeAgent("RETORIKA").score(score_req),
                     JudgeAgent("DAMPAK").score(score_req),
-                    AudienceAgent(language=session_config.language).generate(
-                        avg_score=avg_score,
-                        topic=session_config.topic,
-                    ),
                     return_exceptions=True,
                 )
+
+                # Hitung rata-rata skor juri yang berhasil untuk audience
+                scores = [
+                    r.total_score for r in [logika, retorika, dampak]
+                    if not isinstance(r, Exception) and r.total_score > 0
+                ]
+                avg_score = sum(scores) / len(scores) if scores else 70.0
 
                 # Yield skor masing-masing juri
                 for result in [logika, retorika, dampak]:
                     if not isinstance(result, Exception):
                         yield messages_pb2.DebateUpdate(judge_result=result)
 
-                # Yield reaksi penonton
-                if not isinstance(audience, Exception):
+                # Step 3: Reaksi penonton berdasarkan skor riil juri
+                try:
+                    audience = await AudienceAgent(language=session_config.language).generate(
+                        avg_score=avg_score,
+                        topic=session_config.topic,
+                    )
                     yield messages_pb2.DebateUpdate(audience_react=audience)
+                except Exception as e:
+                    logger.warning(f"[Orchestrate] audience generation gagal: {e}")
 
             # --- Session Ended ---
             elif event.HasField("session_ended"):
-                logger.info(f"[Orchestrate] Session ended: {event.session_ended.session_id}")
+                ended_id = event.session_ended.session_id
+                logger.info(f"[Orchestrate] Session ended: {ended_id}")
+                self._sessions.pop(ended_id, None)
                 break
 
         logger.info("[Orchestrate] Bidirectional stream closed")

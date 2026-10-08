@@ -1,9 +1,11 @@
 package debate
 
 import (
+	"context"
 	"sync"
 
 	pb "github.com/debateai/api-gateway/gen/go/debateai/v1"
+	"github.com/debateai/api-gateway/internal/session"
 	"github.com/debateai/api-gateway/pkg/grpcclient"
 	"github.com/gorilla/websocket"
 )
@@ -72,7 +74,12 @@ type Hub struct {
 	unregister chan *Client
 	broadcast  chan sessionBroadcast
 
-	grpc *grpcclient.Clients
+	grpc  *grpcclient.Clients
+	store *session.Store
+
+	// orchestrators menyimpan stream gRPC aktif per sessionID
+	orchMu     sync.Mutex
+	orchestrators map[string]*SessionOrchestrator
 }
 
 type sessionBroadcast struct {
@@ -81,13 +88,15 @@ type sessionBroadcast struct {
 }
 
 // NewHub membuat Hub baru.
-func NewHub(grpc *grpcclient.Clients) *Hub {
+func NewHub(grpc *grpcclient.Clients, store *session.Store) *Hub {
 	return &Hub{
-		sessions:   make(map[string]map[*Client]bool),
-		register:   make(chan *Client, 100),
-		unregister: make(chan *Client, 100),
-		broadcast:  make(chan sessionBroadcast, 500),
-		grpc:       grpc,
+		sessions:      make(map[string]map[*Client]bool),
+		register:      make(chan *Client, 100),
+		unregister:    make(chan *Client, 100),
+		broadcast:     make(chan sessionBroadcast, 500),
+		grpc:          grpc,
+		store:         store,
+		orchestrators: make(map[string]*SessionOrchestrator),
 	}
 }
 
@@ -156,4 +165,112 @@ func (h *Hub) BroadcastAIChunk(sessionID string, chunk string, isDone bool) {
 			"isDone":  isDone,
 		},
 	})
+}
+
+// SessionOrchestrator mengelola satu stream gRPC bidirectional OrchestrateDebate
+// untuk satu sesi debat. Memastikan SessionStartedEvent dikirim sekali sebelum argumen.
+type SessionOrchestrator struct {
+	hub       *Hub
+	sessionID string
+	stream    pb.DebateEngine_OrchestrateDebateClient
+	sendCh    chan *pb.DebateEvent
+	cancel    context.CancelFunc
+	started   bool
+	mu        sync.Mutex
+}
+
+// getOrCreateOrchestrator mengambil atau membuat orchestrator untuk sesi.
+func (h *Hub) getOrCreateOrchestrator(ctx context.Context, sessionID string) (*SessionOrchestrator, error) {
+	h.orchMu.Lock()
+	defer h.orchMu.Unlock()
+
+	if o, ok := h.orchestrators[sessionID]; ok {
+		return o, nil
+	}
+
+	streamCtx, cancel := context.WithCancel(context.Background())
+	stream, err := h.grpc.OrchestrateDebate(streamCtx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
+	o := &SessionOrchestrator{
+		hub:       h,
+		sessionID: sessionID,
+		stream:    stream,
+		sendCh:    make(chan *pb.DebateEvent, 64),
+		cancel:    cancel,
+	}
+	h.orchestrators[sessionID] = o
+
+	go o.sendLoop()
+	go o.recvLoop()
+
+	return o, nil
+}
+
+// removeOrchestrator menutup dan menghapus orchestrator.
+func (h *Hub) removeOrchestrator(sessionID string) {
+	h.orchMu.Lock()
+	defer h.orchMu.Unlock()
+	if o, ok := h.orchestrators[sessionID]; ok {
+		o.cancel()
+		delete(h.orchestrators, sessionID)
+	}
+}
+
+// sendLoop mengirim event ke stream gRPC.
+func (o *SessionOrchestrator) sendLoop() {
+	for ev := range o.sendCh {
+		if err := o.stream.Send(ev); err != nil {
+			return
+		}
+	}
+}
+
+// recvLoop menerima update dari Python dan broadcast ke client WebSocket.
+func (o *SessionOrchestrator) recvLoop() {
+	for {
+		update, err := o.stream.Recv()
+		if err != nil {
+			return
+		}
+		switch u := update.Update.(type) {
+		case *pb.DebateUpdate_OpponentChunk:
+			o.hub.BroadcastAIChunk(o.sessionID, u.OpponentChunk.Content, u.OpponentChunk.IsDone)
+		case *pb.DebateUpdate_JudgeResult:
+			o.hub.BroadcastJudgeScore(o.sessionID, u.JudgeResult)
+		case *pb.DebateUpdate_AudienceReact:
+			o.hub.BroadcastAudienceReaction(o.sessionID, u.AudienceReact)
+		case *pb.DebateUpdate_Error:
+			o.hub.BroadcastToSession(o.sessionID, ServerMessage{
+				Type: MsgTypeError,
+				Payload: map[string]string{
+					"code":    u.Error.Code,
+					"message": u.Error.Message,
+				},
+			})
+		}
+	}
+}
+
+// ensureStarted mengirim SessionStartedEvent sekali jika belum.
+func (o *SessionOrchestrator) ensureStarted(cfg *pb.SessionStartedEvent) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.started {
+		return
+	}
+	o.started = true
+	o.sendCh <- &pb.DebateEvent{
+		Event: &pb.DebateEvent_SessionStarted{SessionStarted: cfg},
+	}
+}
+
+// sendArgument mengirim event argumen ke engine.
+func (o *SessionOrchestrator) sendArgument(ev *pb.ArgumentSubmittedEvent) {
+	o.sendCh <- &pb.DebateEvent{
+		Event: &pb.DebateEvent_ArgumentSubmitted{ArgumentSubmitted: ev},
+	}
 }

@@ -97,7 +97,10 @@ class JudgeAgent:
         # Susun riwayat singkat jika ada
         history_text = ""
         if request.history:
-            history_lines = [f"- Turn {h.turn_number} ({h.speaker}): {h.content}" for h in request.history[-4:]]
+            history_lines = [
+                f"- Turn {h.turn_number} ({'User' if h.role == 'user' else 'AI'}): {h.content}"
+                for h in request.history[-4:]
+            ]
             history_text = "\nRiwayat konteks debat sebelumnya:\n" + "\n".join(history_lines) + "\n"
 
         human_prompt = f"""Nilai argumen berikut berdasarkan rubrik spesialisasi Anda:

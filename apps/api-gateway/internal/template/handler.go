@@ -51,7 +51,7 @@ func NewHandler(db *pgxpool.Pool) *Handler {
 
 // List handles GET /session-templates
 func (h *Handler) List(c echo.Context) error {
-	userID, ok := c.Get("userId").(string)
+	userID, ok := c.Get("user_id").(string)
 	if !ok || userID == "" {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
@@ -89,7 +89,7 @@ func (h *Handler) List(c echo.Context) error {
 
 // Create handles POST /session-templates
 func (h *Handler) Create(c echo.Context) error {
-	userID, ok := c.Get("userId").(string)
+	userID, ok := c.Get("user_id").(string)
 	if !ok || userID == "" {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
@@ -150,7 +150,7 @@ func (h *Handler) Create(c echo.Context) error {
 
 // Delete handles DELETE /session-templates/:id
 func (h *Handler) Delete(c echo.Context) error {
-	userID, ok := c.Get("userId").(string)
+	userID, ok := c.Get("user_id").(string)
 	if !ok || userID == "" {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
